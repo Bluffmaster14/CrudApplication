@@ -1,0 +1,63 @@
+pipeline{
+    agent any
+    tools {
+    maven 'Maven 3.9.8'
+   }
+    environment{
+       MAVEN_OPTS="--add-opens java.base/java.lang=ALL-UNNAMED"
+    }
+    parameters {
+        string(name: 'branch', defaultValue: 'master', description: 'branch name')
+        string(name: 'repo', defaultValue: 'https://github.com/Bluffmaster14/CrudApplication.git', description: 'git repo url')
+    }
+    stages{
+        stage("git checkout"){
+            steps{
+                echo "cloning the git project"
+                sh "git clone -b ${params.branch} ${params.repo}"
+            }
+        }
+        stage("Maven build"){
+            steps{
+                echo "Building the project"
+                sh "cd CrudApplication; mvn clean compile install -DskipTests"
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh 'mvn sonar:sonar'
+                }
+            }
+        }
+        stage("Image Build"){
+            steps{
+                echo "creating docker image"
+                sh '''
+                 cd CrudApplication/Dockerfile
+                 cp ../target/Crud-0.0.1-SNAPSHOT.jar .
+                 sudo docker build -t crudapp:${BUILD_NUMBER} .
+                 sudo docker tag crudapp:${BUILD_NUMBER} bluffmaster32/crudapp:${BUILD_NUMBER}
+                 sudo docker push bluffmaster32/crudapp:${BUILD_NUMBER}
+                '''
+            }
+        }
+        stage("Scan image"){
+            steps{
+            echo "Scanning image for vulnerabilities"
+            sh " trivy image --format json --output trivy-report.json bluffmaster32/crudapp:${BUILD_NUMBER}"
+            sh '''
+                    jq -r '["VulnerabilityID","PkgName","InstalledVersion","FixedVersion","Severity"],
+                           (.Results[] | .Vulnerabilities[] | [.VulnerabilityID, .PkgName, .InstalledVersion, .FixedVersion, .Severity]) |
+                           @csv'trivy-report.json > trivy-report.csv
+            '''
+            }
+        }
+        stage("Upload report to S3"){
+            steps{
+            echo "Uploading trivy report"
+            sh "aws s3 cp trivy-report.csv s3://my-unique-1234511111/reports/trivy-report-${BUILD_NUMBER}.csv"
+           }
+        }
+    }
+}
